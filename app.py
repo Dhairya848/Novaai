@@ -1,10 +1,10 @@
 
 import os
 import json
+import time
 import base64
 import sqlite3
 import logging
-import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -12,423 +12,473 @@ import requests
 from flask import Flask, request, jsonify, send_from_directory
 from dotenv import load_dotenv
 
-# ==================================================
-# NOVAAI - MULTI PROVIDER BACKEND
-# Free-access providers + quota tracking + fallback
-# ==================================================
+# ==========================================
+# NOVAAI - MULTI PROVIDER AI BACKEND
+# ==========================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
-logger = logging.getLogger("NovaAI")
-
 app = Flask(__name__, static_folder=None)
-
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
 
-DB_PATH = os.path.join(BASE_DIR, "novaai_usage.db")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("novaai")
 
-TIMEOUT = (10, 90)
-MAX_IMAGE_SIZE = 10 * 1024 * 1024
-MAX_HISTORY = 30
-MAX_MESSAGE_LENGTH = 20000
+DB_PATH = os.getenv(
+    "NOVA_DB_PATH",
+    os.path.join(BASE_DIR, "novaai_usage.db")
+)
 
-SYSTEM_PROMPT = """
-You are NovaAI, a helpful and intelligent AI assistant.
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "90"))
+MAX_MESSAGE_LENGTH = int(os.getenv("MAX_MESSAGE_LENGTH", "12000"))
+MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
-Your responsibilities:
-- Answer questions accurately.
-- Explain difficult topics clearly.
-- Help with science, mathematics, education and coding.
-- Write clean and correct code.
-- Analyse uploaded images when supported.
-- Never invent facts when uncertain.
-- Be friendly, professional and respectful.
-"""
+SYSTEM_PROMPT = os.getenv(
+    "SYSTEM_PROMPT",
+    "You are NovaAI, a helpful, accurate, friendly AI assistant. "
+    "Explain clearly, admit uncertainty, and never invent sources."
+)
 
-# ==================================================
-# CONFIGURATION HELPERS
-# ==================================================
-
-def get_env(name, default=""):
-    return os.getenv(name, default).strip()
-
-
-def get_int(name, default=0):
-    try:
-        return max(0, int(get_env(name, str(default))))
-    except ValueError:
-        return default
-
-
-# ==================================================
-# PROVIDER CONFIGURATION
-# ==================================================
+# ==========================================
+# AI PROVIDERS
+# ==========================================
 
 PROVIDERS = {
     "gemini": {
-        "name": "Google Gemini",
-        "type": "gemini",
-        "key": get_env("GEMINI_API_KEY"),
-        "model": get_env("GEMINI_MODEL", "gemini-2.5-flash"),
-    },
-
-    "groq": {
-        "name": "Groq",
-        "type": "openai",
-        "key": get_env("GROQ_API_KEY"),
-        "model": get_env("GROQ_MODEL", "openai/gpt-oss-120b"),
-        "url": "https://api.groq.com/openai/v1/chat/completions",
-    },
-
-    "mistral": {
-        "name": "Mistral AI",
-        "type": "openai",
-        "key": get_env("MISTRAL_API_KEY"),
-        "model": get_env("MISTRAL_MODEL", "mistral-small-latest"),
-        "url": "https://api.mistral.ai/v1/chat/completions",
+        "label": "Google Gemini",
+        "kind": "gemini",
+        "key_env": "GEMINI_API_KEY",
+        "model_env": "GEMINI_MODEL",
+        "default_model": "gemini-2.5-flash",
+        "limit_env": "GEMINI_DAILY_LIMIT",
+        "period": "day",
     },
 
     "openrouter": {
-        "name": "OpenRouter",
-        "type": "openai",
-        "key": get_env("OPENROUTER_API_KEY"),
-        "model": get_env("OPENROUTER_MODEL", "openrouter/free"),
+        "label": "OpenRouter",
+        "kind": "openai",
         "url": "https://openrouter.ai/api/v1/chat/completions",
+        "key_env": "OPENROUTER_API_KEY",
+        "model_env": "OPENROUTER_MODEL",
+        "default_model": "openrouter/free",
+        "limit_env": "OPENROUTER_DAILY_LIMIT",
+        "period": "day",
     },
 
-    "sambanova": {
-        "name": "SambaNova",
-        "type": "openai",
-        "key": get_env("SAMBANOVA_API_KEY"),
-        "model": get_env("SAMBANOVA_MODEL"),
-        "url": "https://api.sambanova.ai/v1/chat/completions",
-    },
-
-    "cohere": {
-        "name": "Cohere",
-        "type": "openai",
-        "key": get_env("COHERE_API_KEY"),
-        "model": get_env("COHERE_MODEL"),
-        "url": "https://api.cohere.com/compatibility/v1/chat/completions",
+    "groq": {
+        "label": "Groq",
+        "kind": "openai",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "key_env": "GROQ_API_KEY",
+        "model_env": "GROQ_MODEL",
+        "default_model": "openai/gpt-oss-120b",
+        "limit_env": "GROQ_DAILY_LIMIT",
+        "period": "day",
     },
 
     "cloudflare": {
-        "name": "Cloudflare Workers AI",
-        "type": "openai",
-        "key": get_env("CLOUDFLARE_API_TOKEN"),
-        "model": get_env("CLOUDFLARE_MODEL"),
-        "account_id": get_env("CLOUDFLARE_ACCOUNT_ID"),
-        "url": (
-            "https://api.cloudflare.com/client/v4/accounts/"
-            + get_env("CLOUDFLARE_ACCOUNT_ID")
-            + "/ai/v1/chat/completions"
-        ),
-    },
-
-    "nvidia": {
-        "name": "NVIDIA NIM",
-        "type": "openai",
-        "key": get_env("NVIDIA_API_KEY"),
-        "model": get_env("NVIDIA_MODEL"),
-        "url": "https://integrate.api.nvidia.com/v1/chat/completions",
+        "label": "Cloudflare Workers AI",
+        "kind": "cloudflare",
+        "key_env": "CLOUDFLARE_API_TOKEN",
+        "account_env": "CLOUDFLARE_ACCOUNT_ID",
+        "model_env": "CLOUDFLARE_MODEL",
+        "default_model": "@cf/meta/llama-3.1-8b-instruct",
+        "limit_env": "CLOUDFLARE_DAILY_LIMIT",
+        "period": "day",
     },
 }
 
-# Automatic provider order
 AUTO_ORDER = [
     "gemini",
-    "groq",
-    "mistral",
     "openrouter",
-    "sambanova",
-    "cohere",
-    "cloudflare",
-    "nvidia",
+    "groq",
+    "cloudflare"
 ]
 
-# ==================================================
-# LOCAL QUOTA SETTINGS
-#
-# 0 = no local cap
-# These are local safety caps, not guaranteed
-# provider allowances.
-# ==================================================
+COOLDOWN_SECONDS = int(
+    os.getenv("PROVIDER_COOLDOWN_SECONDS", "900")
+)
 
-DAILY_LIMITS = {
-    "gemini": get_int("GEMINI_DAILY_LIMIT", 0),
-    "groq": get_int("GROQ_DAILY_LIMIT", 0),
-    "mistral": get_int("MISTRAL_DAILY_LIMIT", 0),
-    "openrouter": get_int("OPENROUTER_DAILY_LIMIT", 50),
-    "sambanova": get_int("SAMBANOVA_DAILY_LIMIT", 0),
-    "cloudflare": get_int("CLOUDFLARE_DAILY_LIMIT", 0),
-    "nvidia": get_int("NVIDIA_DAILY_LIMIT", 0),
-}
 
-MONTHLY_LIMITS = {
-    "cohere": get_int("COHERE_MONTHLY_LIMIT", 1000),
-}
+# ==========================================
+# ERRORS
+# ==========================================
 
-# How long to pause a provider after a 429 response.
-DEFAULT_COOLDOWN = get_int("PROVIDER_COOLDOWN_SECONDS", 900)
+class ProviderError(Exception):
 
-# ==================================================
+    def __init__(self, provider, message, status_code=None):
+        super().__init__(message)
+        self.provider = provider
+        self.status_code = status_code
+
+
+# ==========================================
 # DATABASE
-# ==================================================
+# ==========================================
 
-def database():
-    return sqlite3.connect(DB_PATH, timeout=20)
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def period_key(period):
+    current = now_utc()
+
+    if period == "month":
+        return current.strftime("%Y-%m")
+
+    return current.strftime("%Y-%m-%d")
+
+
+def db_connection():
+    conn = sqlite3.connect(DB_PATH, timeout=20)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def initialize_database():
-    with database() as db:
-        db.execute("""
+
+    with db_connection() as conn:
+
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS usage (
                 provider TEXT NOT NULL,
                 period TEXT NOT NULL,
                 count INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(provider, period)
+                PRIMARY KEY (provider, period)
             )
         """)
 
-        db.execute("""
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS cooldowns (
                 provider TEXT PRIMARY KEY,
-                until_time REAL NOT NULL
+                until_time REAL NOT NULL,
+                reason TEXT DEFAULT ''
             )
         """)
 
-    logger.info("Usage database initialized.")
+        conn.commit()
 
 
-def current_day():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def get_usage(provider):
 
+    period = PROVIDERS[provider]["period"]
+    key = period_key(period)
 
-def current_month():
-    return datetime.now(timezone.utc).strftime("%Y-%m")
+    with db_connection() as conn:
 
-
-def get_usage(provider, period):
-    with database() as db:
-        row = db.execute(
+        row = conn.execute(
             "SELECT count FROM usage WHERE provider=? AND period=?",
-            (provider, period)
+            (provider, key)
         ).fetchone()
 
-    return row[0] if row else 0
+    return int(row["count"]) if row else 0
 
 
-def increase_usage(provider, period):
-    with database() as db:
-        db.execute("""
+def increment_usage(provider):
+
+    period = PROVIDERS[provider]["period"]
+    key = period_key(period)
+
+    with db_connection() as conn:
+
+        conn.execute("""
             INSERT INTO usage(provider, period, count)
-            VALUES (?, ?, 1)
+            VALUES(?, ?, 1)
+
             ON CONFLICT(provider, period)
             DO UPDATE SET count = count + 1
-        """, (provider, period))
+        """, (provider, key))
 
+        conn.commit()
+
+
+# ==========================================
+# COOLDOWN SYSTEM
+# ==========================================
 
 def get_cooldown(provider):
-    with database() as db:
-        row = db.execute(
-            "SELECT until_time FROM cooldowns WHERE provider=?",
+
+    with db_connection() as conn:
+
+        row = conn.execute(
+            "SELECT until_time, reason FROM cooldowns WHERE provider=?",
             (provider,)
         ).fetchone()
 
     if not row:
-        return 0
+        return None
 
-    remaining = int(row[0] - time.time())
+    remaining = float(row["until_time"]) - time.time()
 
     if remaining <= 0:
-        with database() as db:
-            db.execute(
+
+        with db_connection() as conn:
+            conn.execute(
                 "DELETE FROM cooldowns WHERE provider=?",
                 (provider,)
             )
-        return 0
+            conn.commit()
 
-    return remaining
-
-
-def set_cooldown(provider, seconds=None):
-    if seconds is None:
-        seconds = DEFAULT_COOLDOWN
-
-    seconds = max(60, min(int(seconds), 86400))
-    until_time = time.time() + seconds
-
-    with database() as db:
-        db.execute("""
-            INSERT INTO cooldowns(provider, until_time)
-            VALUES (?, ?)
-            ON CONFLICT(provider)
-            DO UPDATE SET until_time=excluded.until_time
-        """, (provider, until_time))
-
-
-# ==================================================
-# QUOTA CHECKING
-# ==================================================
-
-def quota_information(provider):
-    daily_limit = DAILY_LIMITS.get(provider, 0)
-    monthly_limit = MONTHLY_LIMITS.get(provider, 0)
-
-    daily_used = get_usage(provider, current_day())
-    monthly_used = get_usage(provider, current_month())
-
-    daily_remaining = (
-        max(0, daily_limit - daily_used)
-        if daily_limit else None
-    )
-
-    monthly_remaining = (
-        max(0, monthly_limit - monthly_used)
-        if monthly_limit else None
-    )
-
-    cooldown = get_cooldown(provider)
-
-    allowed = (
-        (not daily_limit or daily_used < daily_limit)
-        and (not monthly_limit or monthly_used < monthly_limit)
-        and cooldown == 0
-    )
+        return None
 
     return {
-        "daily_limit": daily_limit or None,
-        "daily_used": daily_used,
-        "daily_remaining": daily_remaining,
-        "monthly_limit": monthly_limit or None,
-        "monthly_used": monthly_used,
-        "monthly_remaining": monthly_remaining,
-        "cooldown_seconds": cooldown,
-        "allowed": allowed,
+        "seconds": int(remaining),
+        "reason": row["reason"] or "Temporarily paused"
     }
 
 
-def can_use_provider(provider):
-    return quota_information(provider)["allowed"]
+def set_cooldown(provider, seconds, reason):
+
+    seconds = max(30, min(int(seconds), 86400))
+
+    with db_connection() as conn:
+
+        conn.execute("""
+            INSERT INTO cooldowns(provider, until_time, reason)
+            VALUES(?, ?, ?)
+
+            ON CONFLICT(provider)
+            DO UPDATE SET
+                until_time=excluded.until_time,
+                reason=excluded.reason
+        """, (
+            provider,
+            time.time() + seconds,
+            str(reason)[:200]
+        ))
+
+        conn.commit()
 
 
-def is_configured(provider):
-    p = PROVIDERS[provider]
+def clear_cooldown(provider):
 
-    if not p.get("key") or not p.get("model"):
+    with db_connection() as conn:
+
+        conn.execute(
+            "DELETE FROM cooldowns WHERE provider=?",
+            (provider,)
+        )
+
+        conn.commit()
+
+
+# ==========================================
+# PROVIDER CONFIGURATION
+# ==========================================
+
+def provider_configured(provider):
+
+    cfg = PROVIDERS[provider]
+
+    if not os.getenv(cfg["key_env"], "").strip():
         return False
 
     if provider == "cloudflare":
-        return bool(p.get("account_id"))
+
+        if not os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip():
+            return False
 
     return True
 
 
+def provider_model(provider):
+
+    cfg = PROVIDERS[provider]
+
+    return (
+        os.getenv(cfg["model_env"], cfg["default_model"]).strip()
+        or cfg["default_model"]
+    )
+
+
+def local_limit(provider):
+
+    env_name = PROVIDERS[provider]["limit_env"]
+
+    try:
+        return max(0, int(os.getenv(env_name, "0")))
+    except ValueError:
+        return 0
+
+
+def provider_available(provider):
+
+    if not provider_configured(provider):
+        return False, "API key or account ID missing"
+
+    cooldown = get_cooldown(provider)
+
+    if cooldown:
+        return False, f"Cooldown: {cooldown['seconds']} seconds"
+
+    limit = local_limit(provider)
+
+    if limit > 0 and get_usage(provider) >= limit:
+        return False, "Local usage limit reached"
+
+    return True, "Ready"
+
+
+# ==========================================
+# PROVIDER STATUS
+# ==========================================
+
 def get_provider_status():
-    result = []
 
-    for provider, p in PROVIDERS.items():
-        info = quota_information(provider)
+    output = []
 
-        result.append({
+    for provider, cfg in PROVIDERS.items():
+
+        configured = provider_configured(provider)
+        available, reason = provider_available(provider)
+        limit = local_limit(provider)
+
+        output.append({
+
             "id": provider,
-            "name": p["name"],
-            "model": p["model"],
-            "configured": is_configured(provider),
-            "quota": info,
+            "name": cfg["label"],
+            "configured": configured,
+            "available": available,
+            "status": reason,
+            "model": provider_model(provider),
+
+            "quota": {
+                "used": get_usage(provider) if configured else 0,
+
+                "daily_limit": (
+                    limit if cfg["period"] == "day" else 0
+                ),
+
+                "monthly_limit": (
+                    limit if cfg["period"] == "month" else 0
+                ),
+
+                "period": cfg["period"],
+            }
         })
 
-    return result
+    return output
 
 
-# ==================================================
-# ERROR HANDLING
-# ==================================================
+# ==========================================
+# RESPONSE ERROR HANDLING
+# ==========================================
 
-class ProviderError(Exception):
-    def __init__(self, message, status_code=None, retry_after=None):
-        super().__init__(message)
-        self.status_code = status_code
-        self.retry_after = retry_after
-
-
-def read_error(response):
-    try:
-        data = response.json()
-        error = data.get("error", data)
-
-        if isinstance(error, dict):
-            return str(
-                error.get("message")
-                or error.get("type")
-                or "Provider error"
-            )[:400]
-
-        return str(error)[:400]
-
-    except Exception:
-        return response.text[:200]
-
-
-def send_request(url, headers, payload, provider):
-    try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=TIMEOUT,
-        )
-
-    except requests.Timeout:
-        raise ProviderError("Request timed out.")
-
-    except requests.RequestException:
-        raise ProviderError("Network connection failed.")
-
-    if not response.ok:
-        retry_after = response.headers.get("Retry-After")
-
-        try:
-            retry_after = int(retry_after) if retry_after else None
-        except ValueError:
-            retry_after = None
-
-        raise ProviderError(
-            read_error(response),
-            status_code=response.status_code,
-            retry_after=retry_after,
-        )
+def safe_json(response):
 
     try:
         return response.json()
+    except Exception:
+        return {}
 
-    except ValueError:
-        raise ProviderError("Invalid response from provider.")
+
+def response_error(provider, response):
+
+    data = safe_json(response)
+
+    message = (
+        data.get("error", {}).get("message")
+        if isinstance(data.get("error"), dict)
+        else None
+    )
+
+    if not message:
+
+        message = (
+            data.get("message")
+            or response.text[:500]
+            or "Provider request failed"
+        )
+
+    if response.status_code == 429:
+
+        retry_after = response.headers.get("Retry-After", "")
+
+        try:
+            delay = int(retry_after)
+        except (TypeError, ValueError):
+            delay = COOLDOWN_SECONDS
+
+        set_cooldown(
+            provider,
+            delay,
+            "Rate limit / quota reached"
+        )
+
+    elif response.status_code in (401, 403):
+
+        set_cooldown(
+            provider,
+            3600,
+            "Authentication or permission error"
+        )
+
+    raise ProviderError(
+        provider,
+        f"{PROVIDERS[provider]['label']}: {message}",
+        response.status_code
+    )
 
 
-# ==================================================
-# INPUT VALIDATION
-# ==================================================
+# ==========================================
+# IMAGE HANDLING
+# ==========================================
 
-def get_history():
-    raw = request.form.get("history", "[]")
+def image_to_data_url(image_file):
+
+    if not image_file:
+        return None
+
+    raw = image_file.read()
+
+    if not raw:
+        return None
+
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise ValueError(
+            "Image is too large. Maximum image size is 10 MB."
+        )
+
+    mime = image_file.mimetype or "application/octet-stream"
+
+    if mime not in (
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/gif"
+    ):
+        raise ValueError(
+            "Please upload a JPG, PNG, WEBP, or GIF image."
+        )
+
+    encoded = base64.b64encode(raw).decode("ascii")
+
+    return f"data:{mime};base64,{encoded}"
+
+
+# ==========================================
+# CHAT HISTORY
+# ==========================================
+
+def clean_history(raw_history):
+
+    if not raw_history:
+        return []
 
     try:
-        history = json.loads(raw)
-    except (ValueError, TypeError):
-        raise ValueError("Invalid chat history.")
+        items = json.loads(raw_history)
+    except (TypeError, json.JSONDecodeError):
+        return []
 
-    if not isinstance(history, list):
-        raise ValueError("History must be a list.")
+    if not isinstance(items, list):
+        return []
 
     cleaned = []
 
-    for item in history[-MAX_HISTORY:]:
+    for item in items[-MAX_HISTORY_MESSAGES:]:
+
         if not isinstance(item, dict):
             continue
 
@@ -441,356 +491,468 @@ def get_history():
         if not isinstance(content, str):
             continue
 
-        content = content.strip()[:MAX_MESSAGE_LENGTH]
+        content = content.strip()
 
         if content:
+
             cleaned.append({
                 "role": role,
-                "content": content,
+                "content": content[:MAX_MESSAGE_LENGTH]
             })
 
     return cleaned
 
 
-def get_image():
-    file = request.files.get("image")
+def build_openai_messages(history, message, image_data_url=None):
 
-    if not file or not file.filename:
-        return None
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+        }
+    ]
 
-    mime = (file.mimetype or "").lower()
+    messages.extend(clean_history(json.dumps(history)))
 
-    allowed = {
-        "image/jpeg",
-        "image/png",
-        "image/webp",
-        "image/gif",
-    }
+    if image_data_url:
 
-    if mime not in allowed:
-        raise ValueError("Unsupported image format.")
-
-    raw = file.read(MAX_IMAGE_SIZE + 1)
-
-    if not raw:
-        raise ValueError("Empty image.")
-
-    if len(raw) > MAX_IMAGE_SIZE:
-        raise ValueError("Image must be under 10 MB.")
-
-    return {
-        "mime_type": mime,
-        "data": base64.b64encode(raw).decode("utf-8"),
-    }
-
-
-# ==================================================
-# GEMINI API
-# ==================================================
-
-def call_gemini(p, history, message, image):
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        + quote(p["model"], safe="")
-        + ":generateContent"
-    )
-
-    contents = []
-
-    for item in history:
-        contents.append({
-            "role": "model" if item["role"] == "assistant" else "user",
-            "parts": [{"text": item["content"]}],
-        })
-
-    parts = [{"text": message or "Please analyse this image."}]
-
-    if image:
-        parts.append({
-            "inline_data": {
-                "mime_type": image["mime_type"],
-                "data": image["data"],
-            }
-        })
-
-    contents.append({
-        "role": "user",
-        "parts": parts,
-    })
-
-    payload = {
-        "systemInstruction": {
-            "parts": [{"text": SYSTEM_PROMPT}]
-        },
-        "contents": contents,
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 4096,
-        },
-    }
-
-    data = send_request(
-        url + "?key=" + quote(p["key"], safe=""),
-        {"Content-Type": "application/json"},
-        payload,
-        "gemini",
-    )
-
-    try:
-        answer = "\n".join(
-            part.get("text", "")
-            for part in data["candidates"][0]["content"]["parts"]
-            if part.get("text")
-        ).strip()
-
-        if answer:
-            return answer
-
-    except (KeyError, IndexError, TypeError):
-        pass
-
-    raise ProviderError("Gemini returned no text.")
-
-
-# ==================================================
-# OPENAI-COMPATIBLE PROVIDERS
-# ==================================================
-
-def extract_ai_text(data):
-    try:
-        content = data["choices"][0]["message"]["content"]
-
-        if isinstance(content, str):
-            return content.strip()
-
-        if isinstance(content, list):
-            return "\n".join(
-                item.get("text", "")
-                for item in content
-                if isinstance(item, dict) and item.get("type") == "text"
-            ).strip()
-
-    except (KeyError, IndexError, TypeError):
-        pass
-
-    raise ProviderError("Could not read AI response.")
-
-
-def call_openai_provider(provider, p, history, message, image):
-    headers = {
-        "Authorization": "Bearer " + p["key"],
-        "Content-Type": "application/json",
-    }
-
-    if provider == "openrouter":
-        headers["HTTP-Referer"] = "https://novaai.local"
-        headers["X-Title"] = "NovaAI"
-
-    messages = [{
-        "role": "system",
-        "content": SYSTEM_PROMPT,
-    }]
-
-    for item in history:
-        messages.append({
-            "role": item["role"],
-            "content": item["content"],
-        })
-
-    if image:
-        user_content = [
+        content = [
             {
                 "type": "text",
-                "text": message or "Please analyse this image.",
+                "text": message or "Please analyze this image."
             },
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": (
-                        "data:"
-                        + image["mime_type"]
-                        + ";base64,"
-                        + image["data"]
-                    )
-                },
-            },
+                    "url": image_data_url
+                }
+            }
         ]
+
     else:
-        user_content = message
+        content = message
 
     messages.append({
         "role": "user",
-        "content": user_content,
+        "content": content
+    })
+
+    return messages
+
+
+# ==========================================
+# OPENAI-COMPATIBLE PROVIDERS
+# GROQ + OPENROUTER
+# ==========================================
+
+def ask_openai_compatible(
+    provider,
+    history,
+    message,
+    image_data_url=None
+):
+
+    cfg = PROVIDERS[provider]
+
+    headers = {
+        "Authorization": (
+            f"Bearer {os.getenv(cfg['key_env']).strip()}"
+        ),
+        "Content-Type": "application/json",
+    }
+
+    if provider == "openrouter":
+
+        headers["HTTP-Referer"] = os.getenv(
+            "OPENROUTER_SITE_URL",
+            "https://novaai.local"
+        )
+
+        headers["X-Title"] = os.getenv(
+            "OPENROUTER_APP_NAME",
+            "NovaAI"
+        )
+
+    payload = {
+
+        "model": provider_model(provider),
+
+        "messages": build_openai_messages(
+            history,
+            message,
+            image_data_url
+        ),
+
+        "temperature": float(
+            os.getenv("AI_TEMPERATURE", "0.7")
+        ),
+
+        "max_tokens": int(
+            os.getenv("AI_MAX_TOKENS", "2048")
+        ),
+    }
+
+    try:
+
+        response = requests.post(
+            cfg["url"],
+            headers=headers,
+            json=payload,
+            timeout=REQUEST_TIMEOUT
+        )
+
+    except requests.RequestException as exc:
+
+        raise ProviderError(
+            provider,
+            f"Network error: {exc}"
+        ) from exc
+
+    if not response.ok:
+        response_error(provider, response)
+
+    data = safe_json(response)
+
+    try:
+
+        answer = data["choices"][0]["message"]["content"]
+
+    except (KeyError, IndexError, TypeError):
+
+        raise ProviderError(
+            provider,
+            "The provider returned an unexpected response."
+        )
+
+    if isinstance(answer, list):
+
+        answer = "\n".join(
+            part.get("text", "")
+            for part in answer
+            if isinstance(part, dict)
+        )
+
+    answer = str(answer or "").strip()
+
+    if not answer:
+
+        raise ProviderError(
+            provider,
+            "The provider returned an empty answer."
+        )
+
+    increment_usage(provider)
+    clear_cooldown(provider)
+
+    return answer
+
+
+# ==========================================
+# GOOGLE GEMINI
+# ==========================================
+
+def ask_gemini(history, message, image_data_url=None):
+
+    provider = "gemini"
+
+    api_key = os.getenv(
+        "GEMINI_API_KEY",
+        ""
+    ).strip()
+
+    model = provider_model(provider)
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{quote(model, safe='')}:generateContent"
+    )
+
+    contents = []
+
+    for item in clean_history(json.dumps(history)):
+
+        contents.append({
+
+            "role": (
+                "user"
+                if item["role"] == "user"
+                else "model"
+            ),
+
+            "parts": [
+                {
+                    "text": item["content"]
+                }
+            ]
+        })
+
+    parts = [
+        {
+            "text": message or "Please analyze this image."
+        }
+    ]
+
+    if image_data_url:
+
+        header, encoded = image_data_url.split(",", 1)
+
+        mime = header.split(";")[0].replace("data:", "")
+
+        parts.append({
+
+            "inline_data": {
+                "mime_type": mime,
+                "data": encoded
+            }
+
+        })
+
+    contents.append({
+        "role": "user",
+        "parts": parts
     })
 
     payload = {
-        "model": p["model"],
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 4096,
-        "stream": False,
+
+        "system_instruction": {
+            "parts": [
+                {
+                    "text": SYSTEM_PROMPT
+                }
+            ]
+        },
+
+        "contents": contents,
+
+        "generationConfig": {
+
+            "temperature": float(
+                os.getenv("AI_TEMPERATURE", "0.7")
+            ),
+
+            "maxOutputTokens": int(
+                os.getenv("AI_MAX_TOKENS", "2048")
+            ),
+        }
     }
 
-    data = send_request(
-        p["url"],
-        headers,
-        payload,
-        provider,
-    )
+    try:
 
-    return extract_ai_text(data)
+        response = requests.post(
 
+            url,
 
-# ==================================================
-# MAIN PROVIDER DISPATCHER
-# ==================================================
+            params={
+                "key": api_key
+            },
 
-def call_provider(provider, history, message, image):
-    p = PROVIDERS[provider]
+            headers={
+                "Content-Type": "application/json"
+            },
 
-    if p["type"] == "gemini":
-        return call_gemini(p, history, message, image)
+            json=payload,
 
-    if p["type"] == "openai":
-        return call_openai_provider(
-            provider, p, history, message, image
+            timeout=REQUEST_TIMEOUT
         )
 
-    raise ProviderError("Unsupported provider.")
+    except requests.RequestException as exc:
 
+        raise ProviderError(
+            provider,
+            f"Network error: {exc}"
+        ) from exc
 
-# ==================================================
-# PROVIDER REQUEST WITH USAGE TRACKING
-# ==================================================
+    if not response.ok:
+        response_error(provider, response)
 
-def ask_one(provider, history, message, image):
-    if not is_configured(provider):
-        raise ProviderError("Provider is not configured.")
-
-    if not can_use_provider(provider):
-        raise ProviderError("Provider quota exhausted or cooling down.")
-
-    # Count the attempt before sending it. This prevents repeated
-    # attempts from bypassing the local safety cap.
-    period = current_month() if provider in MONTHLY_LIMITS else current_day()
-    increase_usage(provider, period)
+    data = safe_json(response)
 
     try:
-        answer = call_provider(
+
+        answer = "".join(
+
+            part.get("text", "")
+
+            for part in data["candidates"][0]["content"]["parts"]
+
+        ).strip()
+
+    except (KeyError, IndexError, TypeError):
+
+        answer = ""
+
+    if not answer:
+
+        raise ProviderError(
             provider,
+            "Gemini returned an empty or blocked response."
+        )
+
+    increment_usage(provider)
+    clear_cooldown(provider)
+
+    return answer
+
+
+# ==========================================
+# CLOUDFLARE WORKERS AI
+# ==========================================
+
+def ask_cloudflare(history, message, image_data_url=None):
+
+    provider = "cloudflare"
+
+    account_id = os.getenv(
+        "CLOUDFLARE_ACCOUNT_ID",
+        ""
+    ).strip()
+
+    token = os.getenv(
+        "CLOUDFLARE_API_TOKEN",
+        ""
+    ).strip()
+
+    model = provider_model(provider)
+
+    url = (
+        "https://api.cloudflare.com/client/v4/accounts/"
+        f"{quote(account_id, safe='')}/ai/v1/chat/completions"
+    )
+
+    headers = {
+
+        "Authorization": f"Bearer {token}",
+
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+
+        "model": model,
+
+        "messages": build_openai_messages(
             history,
             message,
-            image,
+            image_data_url
+        ),
+
+        "temperature": float(
+            os.getenv("AI_TEMPERATURE", "0.7")
+        ),
+
+        "max_tokens": int(
+            os.getenv("AI_MAX_TOKENS", "2048")
+        ),
+    }
+
+    try:
+
+        response = requests.post(
+
+            url,
+
+            headers=headers,
+
+            json=payload,
+
+            timeout=REQUEST_TIMEOUT
         )
 
-        if not answer:
-            raise ProviderError("Empty response.")
+    except requests.RequestException as exc:
 
-        return answer
-
-    except ProviderError as exc:
-        if exc.status_code == 429:
-            set_cooldown(
-                provider,
-                exc.retry_after or DEFAULT_COOLDOWN
-            )
-
-        elif exc.status_code in (401, 403):
-            # Authentication or permission problems should not
-            # repeatedly hit the same provider.
-            set_cooldown(provider, 3600)
-
-        raise
-
-
-# ==================================================
-# AUTOMATIC FALLBACK
-# ==================================================
-
-def ask_auto(history, message, image):
-    errors = []
-
-    for provider in AUTO_ORDER:
-        if not is_configured(provider):
-            continue
-
-        if not can_use_provider(provider):
-            logger.info("Skipping %s: quota/cooldown", provider)
-            continue
-
-        try:
-            answer = ask_one(
-                provider,
-                history,
-                message,
-                image,
-            )
-
-            return answer, provider
-
-        except Exception as exc:
-            logger.warning(
-                "%s failed: %s",
-                provider,
-                str(exc)[:200],
-            )
-
-            errors.append(provider + ": " + str(exc)[:120])
-
-    if not errors:
         raise ProviderError(
-            "No configured providers are currently available. "
-            "Check your API keys, model IDs and quota settings."
+            provider,
+            f"Network error: {exc}"
+        ) from exc
+
+    if not response.ok:
+        response_error(provider, response)
+
+    data = safe_json(response)
+
+    try:
+
+        answer = data["choices"][0]["message"]["content"]
+
+    except (KeyError, IndexError, TypeError):
+
+        result = data.get("result", {})
+
+        answer = (
+            result.get("response", "")
+            if isinstance(result, dict)
+            else ""
         )
 
-    raise ProviderError(
-        "All available providers failed. "
-        + " | ".join(errors)
+    if isinstance(answer, list):
+
+        answer = "\n".join(
+            part.get("text", "")
+            for part in answer
+            if isinstance(part, dict)
+        )
+
+    answer = str(answer or "").strip()
+
+    if not answer:
+
+        raise ProviderError(
+            provider,
+            "Cloudflare returned an empty or unexpected response."
+        )
+
+    increment_usage(provider)
+    clear_cooldown(provider)
+
+    return answer
+
+
+# ==========================================
+# PROVIDER ROUTER
+# ==========================================
+
+def ask_provider(
+    provider,
+    history,
+    message,
+    image_data_url=None
+):
+
+    available, reason = provider_available(provider)
+
+    if not available:
+
+        raise ProviderError(
+            provider,
+            reason
+        )
+
+    if provider == "gemini":
+
+        return ask_gemini(
+            history,
+            message,
+            image_data_url
+        )
+
+    if provider == "cloudflare":
+
+        return ask_cloudflare(
+            history,
+            message,
+            image_data_url
+        )
+
+    return ask_openai_compatible(
+        provider,
+        history,
+        message,
+        image_data_url
     )
 
 
-# ==================================================
-# FRONTEND ROUTES
-# Only serve the three intended frontend files.
-# ==================================================
+# ==========================================
+# AUTOMATIC FALLBACK
+# ==========================================
 
-@app.route("/")
-def home():
-    return send_from_directory(BASE_DIR, "index.html")
-
-
-@app.route("/style.css")
-def css():
-    return send_from_directory(BASE_DIR, "style.css")
-
-
-@app.route("/script.js")
-def js():
-    return send_from_directory(BASE_DIR, "script.js")
-
-
-# ==================================================
-# CHAT ENDPOINT
-# ==================================================
-
-@app.route("/api/chat", methods=["POST"])
-def chat():
-    try:
-        message = request.form.get("message", "").strip()
-        selected = request.form.get("provider", "auto").lower().strip()
-
-        if len(message) > MAX_MESSAGE_LENGTH:
-            return jsonify({
-                "error": "Message is too long."
-            }), 400
-
-        history = get_history()
-        image = get_image()
-
-        if not message and not image:
-            return jsonify({
-                "error": "Enter a message or upload an image."
-            }), 400
-
-        if selected != "auto" and selected not in PROVIDERS:
-            ret
+def ask_auto(history, message, image_da
