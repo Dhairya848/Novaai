@@ -955,4 +955,47 @@ def ask_provider(
 # AUTOMATIC FALLBACK
 # ==========================================
 
-def ask_auto(history, message, image_da
+
+def ask_auto(history, message, image_data_url=None):
+
+    errors = []
+
+    for provider in AUTO_ORDER:
+
+        available, reason = provider_available(provider)
+
+        if not available:
+            errors.append(
+                f"{PROVIDERS[provider]['label']}: {reason}"
+            )
+            continue
+
+        try:
+            answer = ask_provider(
+                provider,
+                history,
+                message,
+                image_data_url
+            )
+
+            return answer, provider
+
+        except ProviderError as exc:
+            logger.warning(
+                "Provider %s failed: %s",
+                provider,
+                str(exc)
+            )
+            errors.append(str(exc))
+
+    detail = (
+        " | ".join(errors[-4:])
+        if errors
+        else "No providers are configured."
+    )
+
+    raise ProviderError(
+        "auto",
+        "All configured AI providers failed. " + detail
+    )
+    
