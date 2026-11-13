@@ -1,0 +1,354 @@
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <meta name="theme-color" content="#0b1020">
+    <meta name="description" content="NovaAI - One interface, multiple AI providers.">
+
+    <title>NovaAI - Multi AI Assistant</title>
+
+    <!-- CSS -->
+    <link rel="stylesheet" href="style.css">
+
+</head>
+
+<body>
+
+<div class="app">
+
+    <!-- ================= SIDEBAR ================= -->
+
+    <aside class="sidebar" id="sidebar">
+
+        <div class="brand">
+
+            <div class="logo">✦</div>
+
+            <h2>Nova<span>AI</span></h2>
+
+        </div>
+
+        <button class="new-chat" onclick="newChat()">
+            ＋ &nbsp; New Chat
+        </button>
+
+        <div class="section-label">
+            RECENT CHATS
+        </div>
+
+        <div class="history" id="history">
+
+            <div style="color:#718096;font-size:12px;padding:10px">
+                Your chats will appear here.
+            </div>
+
+        </div>
+
+        <div class="sidebar-bottom">
+
+            <div class="profile">
+
+                <div class="avatar">N</div>
+
+                <div>
+                    <strong>NovaAI User</strong>
+                    <br>
+                    <small>Multi-AI Assistant</small>
+                </div>
+
+            </div>
+
+        </div>
+
+    </aside>
+
+
+    <!-- ================= MAIN CONTENT ================= -->
+
+    <main class="main">
+
+        <!-- TOP BAR -->
+
+        <header class="topbar">
+
+            <div class="top-left">
+
+                <button
+                    class="icon-btn mobile-menu"
+                    onclick="toggleSidebar()">
+                    ☰
+                </button>
+
+                <h3>AI Assistant</h3>
+
+                <span class="status">
+                    ● System Ready
+                </span>
+
+            </div>
+
+            <div class="top-right">
+
+                <button
+                    class="icon-btn"
+                    title="Export Chat"
+                    onclick="exportChat()">
+                    ↓
+                </button>
+
+                <button
+                    class="icon-btn"
+                    title="New Chat"
+                    onclick="newChat()">
+                    ＋
+                </button>
+
+            </div>
+
+        </header>
+
+
+        <!-- ================= CHAT AREA ================= -->
+
+        <section class="chat-area" id="chatArea">
+
+            <div class="chat-content" id="chatContent">
+
+
+                <!-- WELCOME SCREEN -->
+
+                <div class="welcome" id="welcome">
+
+                    <div class="welcome-logo">
+                        ✦
+                    </div>
+
+                    <h1>
+                        Welcome to <span>NovaAI</span>
+                    </h1>
+
+                    <p>
+                        One interface. Five AI providers.
+                        <br>
+                        Explore the power of multiple artificial intelligences.
+                    </p>
+
+
+                    <!-- SUGGESTIONS -->
+
+                    <div class="suggestions">
+
+
+                        <button
+                            class="suggestion"
+                            data-prompt="Explain quantum physics in simple words">
+
+                            <strong>
+                                🧠 Learn something
+                            </strong>
+
+                            <small>
+                                Understand difficult concepts easily
+                            </small>
+
+                        </button>
+
+
+                        <button
+                            class="suggestion"
+                            data-prompt="Write a Python program for a calculator">
+
+                            <strong>
+                                💻 Write code
+                            </strong>
+
+                            <small>
+                                Generate and understand programming code
+                            </small>
+
+                        </button>
+
+
+                        <button
+                            class="suggestion"
+                            data-prompt="Give me five innovative science project ideas">
+
+                            <strong>
+                                🔬 Science ideas
+                            </strong>
+
+                            <small>
+                                Explore new inventions and experiments
+                            </small>
+
+                        </button>
+
+
+                        <button
+                            class="suggestion"
+                            data-prompt="Help me create a study timetable">
+
+                            <strong>
+                                📚 Study assistant
+                            </strong>
+
+                            <small>
+                                Plan your learning effectively
+                            </small>
+
+                        </button>
+
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- ================= INPUT AREA ================= -->
+
+        <footer class="input-wrapper">
+
+            <div class="input-container">
+
+
+                <!-- IMAGE PREVIEW -->
+
+                <div class="preview" id="preview">
+
+                    <img
+                        id="previewImage"
+                        src=""
+                        alt="Image preview">
+
+                    <span style="font-size:12px;color:#aaa">
+                        Image attached
+                    </span>
+
+                    <button
+                        class="remove-image"
+                        onclick="removeImage()">
+                        ✕
+                    </button>
+
+                </div>
+
+
+                <!-- TEXT INPUT -->
+
+                <textarea
+                    id="userInput"
+                    placeholder="Ask NovaAI anything..."
+                    rows="1">
+                </textarea>
+
+
+                <!-- INPUT BUTTONS -->
+
+                <div class="input-actions">
+
+                    <div class="left-actions">
+
+
+                        <!-- IMAGE UPLOAD -->
+
+                        <label class="action-btn" style="cursor:pointer">
+
+                            ＋ Image
+
+                            <input
+                                type="file"
+                                id="imageInput"
+                                accept="image/*"
+                                hidden>
+
+                        </label>
+
+
+                        <!-- AI PROVIDER SELECTOR -->
+
+                        <select id="provider">
+
+                            <option value="auto">
+                                ✦ Auto Select
+                            </option>
+
+                            <option value="gemini">
+                                Google Gemini
+                            </option>
+
+                            <option value="openai">
+                                OpenAI GPT
+                            </option>
+
+                            <option value="anthropic">
+                                Anthropic Claude
+                            </option>
+
+                            <option value="groq">
+                                Groq
+                            </option>
+
+                            <option value="mistral">
+                                Mistral AI
+                            </option>
+
+                        </select>
+
+                    </div>
+
+
+                    <!-- SEND BUTTON -->
+
+                    <div class="right-actions">
+
+                        <button
+                            class="send-btn"
+                            id="sendBtn"
+                            title="Send message">
+
+                            ↑
+
+                        </button>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <!-- DISCLAIMER -->
+
+            <p class="disclaimer">
+
+                NovaAI can make mistakes.
+                Verify important information.
+
+                <br>
+
+                Powered by multiple AI providers.
+
+            </p>
+
+        </footer>
+
+    </main>
+
+</div>
+
+
+<!-- JAVASCRIPT -->
+
+<script src="script.js"></script>
+
+</body>
+
+</html>
